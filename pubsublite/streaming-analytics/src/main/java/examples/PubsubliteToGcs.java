@@ -17,9 +17,8 @@ package examples;
 // [START pubsublite_to_gcs]
 
 import com.google.cloud.pubsublite.SubscriptionPath;
-import com.google.cloud.pubsublite.proto.SequencedMessage;
-import org.apache.beam.examples.common.WriteOneFilePerWindow;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.io.gcp.bigtable.BigtableIO;
 import org.apache.beam.sdk.io.gcp.pubsublite.PubsubLiteIO;
 import org.apache.beam.sdk.io.gcp.pubsublite.SubscriberOptions;
 import org.apache.beam.sdk.options.Default;
@@ -28,11 +27,9 @@ import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.options.StreamingOptions;
 import org.apache.beam.sdk.options.Validation.Required;
-import org.apache.beam.sdk.transforms.MapElements;
-import org.apache.beam.sdk.transforms.windowing.FixedWindows;
-import org.apache.beam.sdk.transforms.windowing.Window;
-import org.apache.beam.sdk.values.TypeDescriptors;
-import org.joda.time.Duration;
+import org.apache.beam.sdk.transforms.ParDo;
+import org.apache.kafka.connect.data.SchemaAndValue;
+import org.apache.kafka.connect.json.JsonConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -80,32 +77,11 @@ public class PubsubliteToGcs {
     Pipeline pipeline = Pipeline.create(options);
     pipeline
         .apply("Read From Pub/Sub Lite", PubsubLiteIO.read(subscriberOptions))
-        .apply(
-            "Convert messages",
-            MapElements.into(TypeDescriptors.strings())
-                .via(
-                    (SequencedMessage sequencedMessage) -> {
-                      String data = sequencedMessage.getMessage().getData().toStringUtf8();
-                      LOG.info("Received: " + data);
-                      long publishTime = sequencedMessage.getPublishTime().getSeconds();
-                      return data + "\t" + publishTime;
-                    }))
-        .apply(
-            "Apply windowing function",
-            Window
-                // Group the elements using fixed-sized time intervals based on the element
-                // timestamp (using the default event time trigger). The element timestamp
-                // is the publish timestamp associated with a message.
-                //
-                // NOTE: If data is not being continuously ingested, such as with a batch or
-                // intermittent publisher, the final window will never close as the watermark
-                // will not advance. If this is a possibility with your pipeline, you should
-                // add an additional processing time trigger to force window closure after
-                // enough time has passed. See
-                // https://beam.apache.org/documentation/programming-guide/#triggers
-                // for more information.
-                .<String>into(FixedWindows.of(Duration.standardMinutes(options.getWindowSize()))))
-        .apply("Write elements to GCS", new WriteOneFilePerWindow(options.getOutput(), numShards));
+        .apply(ParDo.of(new KafkaRecordToMutationFn()))
+        .apply(BigtableIO.write().
+            withProjectId("google.com:cloud-bigtable-dev").
+            withInstanceId("shitanshu-test").
+            withTableId("cassandra"));
 
     // Execute the pipeline. You may add `.waitUntilFinish()` to observe logs in your console, but
     // `waitUntilFinish()` will not work in Dataflow Flex Templates.
