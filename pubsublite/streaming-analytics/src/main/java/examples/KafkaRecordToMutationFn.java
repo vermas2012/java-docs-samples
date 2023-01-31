@@ -7,6 +7,7 @@ import com.google.cloud.ByteArray;
 import com.google.cloud.pubsublite.proto.SequencedMessage;
 import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
@@ -14,6 +15,8 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.values.KV;
 import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaAndValue;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.json.JsonConverter;
@@ -24,6 +27,43 @@ public class KafkaRecordToMutationFn extends DoFn<SequencedMessage, KV<ByteStrin
 
   private static final Logger LOG = LoggerFactory.getLogger(KafkaRecordToMutationFn.class);
 
+  static final String AFTER = "after";
+  static final String OPERATION = "op";
+  static final String SOURCE = "source";
+  static final String TIMESTAMP = "ts_ms";
+
+
+  public enum Operation {
+    INSERT("i"),
+    UPDATE("u"),
+    DELETE("d"),
+    RANGE_TOMBSTONE("r");
+
+    private String value;
+
+    Operation(String value) {
+      this.value = value;
+    }
+
+    public static Operation fromValue(String text) {
+      for (Operation op : Operation.values()) {
+        if (op.value.equalsIgnoreCase(text)) {
+          return op;
+        }
+      }
+      return null;
+    }
+
+    public String getValue() {
+      return value;
+    }
+
+    @Override
+    public String toString() {
+      return value;
+    }
+  }
+
   @ProcessElement
   public void processElement(ProcessContext context) throws Exception {
     SequencedMessage message = context.element();
@@ -32,7 +72,6 @@ public class KafkaRecordToMutationFn extends DoFn<SequencedMessage, KV<ByteStrin
     String messageString = new String(rawMessage);
     LOG.info("### Processing message:" + new String(rawMessage) );
     if(messageString.equals("test-val-constrcutor")){
-      LOG.info("### skipping message test-val-constrcutor" );
       return;
     }
     JsonConverter jsonConverter = new JsonConverter();
@@ -43,17 +82,24 @@ public class KafkaRecordToMutationFn extends DoFn<SequencedMessage, KV<ByteStrin
 
     SchemaAndValue schemaAndValue = jsonConverter.toConnectData("shitanshu-test", rawMessage);
 
-    LOG.error("### Deserialized the schema and value: " + schemaAndValue.toString());
-
     Struct  struct = (Struct) schemaAndValue.value();
+    // Not useful right now.
+    Schema schema = schemaAndValue.schema();
+    Struct source = struct.getStruct("source");
+    long timestamp = source.getInt64(TIMESTAMP);
+    Struct after = struct.getStruct(AFTER);
+    Operation op = Operation.fromValue(struct.getString(OPERATION));
 
-    LOG.error("### Deserialized Struct.After: " + struct.getStruct("after").toString());
+    Schema afterSchema = after.schema();
+    // LOG.error("Field schema for user_id.value: " + afterSchema.field("user_id").schema().field("value").toString());
+    String userId = after.getStruct("user_id").getInt32("value") + "";
 
     Mutation.Builder builder = Mutation.newBuilder();
     SetCell.Builder scBuilder = builder.getSetCellBuilder();
-    scBuilder.setFamilyName("cf").setColumnQualifier(ByteString.copyFromUtf8("cassandra-kafka-test")).setTimestampMicros(System.currentTimeMillis() * 1000).setValue(ByteString.copyFromUtf8("testValue"));
+    scBuilder.setFamilyName("cf").setColumnQualifier(ByteString.copyFromUtf8("cassandra-kafka-test")).setTimestampMicros(timestamp * 1000).
+        setValue(ByteString.copyFromUtf8(after.toString()));
     Mutation mutation = builder.setSetCell(scBuilder.build()).build();
-    context.output(KV.of(ByteString.copyFromUtf8("Shitanshu-test-key"), Arrays.asList(mutation)));
+    context.output(KV.of(ByteString.copyFrom(userId.getBytes()), Arrays.asList(mutation)));
     } catch(RuntimeException e){
       LOG.error("Failed to process message " + messageString, e);
       throw e;
